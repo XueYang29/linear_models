@@ -1,0 +1,260 @@
+---
+title: "Cross Validation"
+output: github_document
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+library(tidyverse)
+library(modelr)
+library(mgcv)
+
+theme_set(theme_bw() + theme(legend.position = "bottom"))
+set.seed(1)
+```
+
+## Example
+
+Simulate data
+```{r}
+nonlin_df = tibble(
+  id = 1:100,
+  x = runif(100, 0, 1),
+  y = 1 - 10 * (x - .3) ^ 2 + rnorm(100, 0, .3) # nonlinear function of x
+)
+
+ggplot(nonlin_df, aes(x = x, y = y)) + geom_point() + theme_bw()
+```
+
+Partition into training and testing
+
+```{r}
+# ?sample_n
+
+# create the training dataset with 80 samples in the dataframe 
+# (the samples are not put in order)
+train_df = sample_n(nonlin_df, 80)
+
+# put the samples left in the test dataset
+# give me everything from nonlin_df dataset that are not in the train_df dataset
+test_df = anti_join(nonlin_df, train_df, by = "id")
+
+ggplot(train_df, aes(x = x, y = y)) + 
+  geom_point() + 
+  geom_point(data = test_df, color = "red")
+
+# we will the black points to fit the model and see how the model predict from the point of red
+```
+
+Fit a few models...
+
+```{r}
+# linear model fit
+lin_mod = lm(y ~ x, data = train_df)
+
+# gam fits smooth curves through lines
+nonlin_mod = mgcv::gam(y ~ s(x), data = train_df)
+
+# not a good idea
+wiggly_mod = mgcv::gam(y ~ s(x, k = 30), sp = 10e-6, data = train_df)
+```
+
+Show what these look like:
+
+```{r}
+# not complex enough
+train_df %>% 
+  # add the prediction to the dataframe
+  add_predictions(lin_mod) %>% 
+  ggplot(aes(x = x, y = y)) + geom_point() + 
+  geom_line(aes(y = pred), color = "red")
+```
+
+```{r}
+# this is pretty good
+train_df %>% 
+  add_predictions(nonlin_mod) %>% 
+  ggplot(aes(x = x, y = y)) + geom_point() + 
+  geom_line(aes(y = pred), color = "red")
+```
+
+```{r}
+# this going out of the way to fit, not a great fit. Too complex
+train_df %>% 
+  add_predictions(wiggly_mod) %>% 
+  ggplot(aes(x = x, y = y)) + geom_point() + 
+  geom_line(aes(y = pred), color = "red")
+```
+
+Make all the plots toghter
+```{r}
+train_df %>% 
+  gather_predictions(lin_mod, nonlin_mod, wiggly_mod) %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = x, y = y)) + 
+  geom_point() + 
+  geom_line(aes(y = pred), color = "red") + 
+  facet_wrap(~model)
+```
+
+Root-mean-squared-error
+
+We are interested in root-mean-squared-error in test dataset
+
+```{r}
+# ?rmse
+rmse(lin_mod, test_df)
+## [1] 0.7163422
+rmse(nonlin_mod, test_df)
+## [1] 0.2437012
+rmse(wiggly_mod, test_df)
+## [1] 0.3471883
+```
+
+### Iterate!!
+
+Repeat the data for bunch of random partitions
+
+```{r}
+# generate a bunch of partitions: give the dataset and number of the time you want to repeat the training test split, and each time do it at random, by fault to have 80% of the dataset for traning date, 20% of the datase for test data
+cv_df = 
+  crossv_mc(nonlin_df, 100) 
+```
+
+```{r}
+cv_df %>% pull(train) %>% .[[1]] %>% as_tibble()
+cv_df %>% pull(test) %>% .[[5]] %>% as_tibble()
+```
+
+```{r}
+# change the train and test set to ba a tibble
+cv_df =
+  cv_df %>% 
+  mutate(train = map(train, as_tibble),
+         test = map(test, as_tibble))
+```
+
+```{r}
+cv_df = 
+  cv_df %>% 
+  mutate(lin_mod = map(train, ~lm(y ~ x, data = .x)),
+         nonlin_mod = map(train, ~mgcv::gam(y ~ s(x), data = .x)),
+         wiggly_mod = map(train, ~mgcv::gam(y ~ s(x, k = 30), sp = 10e-6, data = .x))) %>% 
+  mutate(rmse_lin = map2_dbl(lin_mod, test, ~rmse(model = .x, data = .y)),
+         # for the rmse funtion, we have two inputs: fitted model and dataset, so use "map2"
+         # use "maps_dbl" to get the number 
+         rmse_nonlin = map2_dbl(nonlin_mod, test, ~rmse(model = .x, data = .y)),
+         rmse_wiggly = map2_dbl(wiggly_mod, test, ~rmse(model = .x, data = .y)))
+```
+
+Summarize results...
+
+```{r}
+cv_df %>% 
+  select(.id, starts_with("rmse")) %>% 
+  ## tidy the data before make a plot
+  gather(key = model, value = rmse, rmse_lin:rmse_wiggly) %>% 
+  mutate(model = str_replace(model, "rmse_", ""),
+         model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+### Child growth
+
+```{r}
+child_growth = read_csv("./data/nepalese_children.csv")
+skimr::skim(child_growth)
+```
+
+```{r}
+child_growth %>% 
+  ggplot(aes(x = weight, y = armc)) + 
+  geom_point(alpha = .3)
+```
+
+Is this nonlinear?
+```{r}
+child_growth =
+  child_growth %>% 
+  mutate(weight_sp = (weight > 7) * (weight - 7))
+```
+
+```{r}
+lin_mod = lm(armc ~ weight, data = child_growth)
+# piecewise linear model 
+pwl_mod = lm(armc ~ weight + weight_sp, data = child_growth)
+nonlin_mod = gam(armc ~ s(weight), data = child_growth)
+```
+
+Plot all model fits ...
+
+```{r}
+child_growth %>% 
+  gather_predictions(lin_mod, pwl_mod, nonlin_mod) %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = weight, y = armc)) + 
+  geom_point(alpha = .5) +
+  geom_line(aes(y = pred), color = "red") + 
+  facet_grid(~model)
+```
+
+Constructing training / testing splits
+
+```{r}
+cv_df = 
+  crossv_mc(child_growth, 100) %>% 
+  mutate(train = map(train, as_tibble),
+         test = map(test, as_tibble))
+```
+
+```{r}
+cv_df = 
+  cv_df %>% 
+  mutate(lin_mod = map(train, ~lm(armc ~ weight, data = .x)),
+         pwl_mod = map(train, ~lm(armc ~ weight + weight_sp, data = .x)),
+         nonlin_mod = map(train, ~gam(armc ~ s(weight), data = as_tibble(.x)))) %>% 
+  mutate(rmse_lin    = map2_dbl(lin_mod, test, ~rmse(model = .x, data = .y)),
+         rmse_pwl = map2_dbl(pwl_mod, test, ~rmse(model = .x, data = .y)),
+         rmse_nonlin = map2_dbl(nonlin_mod, test, ~rmse(model = .x, data = .y)))
+
+```
+
+Look at results..
+
+```{r}
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  gather(key = model, value = rmse) %>% 
+  mutate(model = str_replace(model, "rmse_", ""),
+         model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+
+```{r}
+# to double check if your predict model is doing better than absolutly nothing
+cv_df = 
+  cv_df %>% 
+  mutate(int_mod = map(train, ~lm(armc ~ 1, data = .x)),
+         lin_mod = map(train, ~lm(armc ~ weight, data = .x)),
+         pwl_mod = map(train, ~lm(armc ~ weight + weight_sp, data = .x)),
+         nonlin_mod = map(train, ~gam(armc ~ s(weight), data = as_tibble(.x)))) %>% 
+  mutate(rmse_int    = map2_dbl(int_mod, test, ~rmse(model = .x, data = .y)),
+         rmse_lin    = map2_dbl(lin_mod, test, ~rmse(model = .x, data = .y)),
+         rmse_pwl = map2_dbl(pwl_mod, test, ~rmse(model = .x, data = .y)),
+         rmse_nonlin = map2_dbl(nonlin_mod, test, ~rmse(model = .x, data = .y)))
+
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  gather(key = model, value = rmse) %>% 
+  mutate(model = str_replace(model, "rmse_", ""),
+         model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+# it's great because at very least, the model you predict is much better than doing absolutly nothing
+```
